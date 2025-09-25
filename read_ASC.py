@@ -209,53 +209,27 @@ class dls_sls_analysis:
 
     
     def get_data(self, angle='all', data_type='all', sample_name='all', duration='all'):
-        # #control if varibles are valid
+        #control if varibles are valid
         search_vars = {'sample_name': sample_name, 'duration': duration,  'angle': angle}
         for var, val in search_vars.items():
             if (val != 'all') and (type(val) != list):
                 if (var == 'sample_name') and (val not in self.sample_names):
                     raise ValueError(f"Sample name '{val}' not found. Available names: {self.sample_names}")
                 if (var == 'duration') and (val not in self.sample_Durations):
-                    raise ValueError(f"Sample name '{val}' not found. Available names: {self.sample_names}")               
+                    raise ValueError(f"Duration '{val}' not found. Available names: {self.sample_names}")               
                 if (var == 'angle') and (val not in self.sample_angles):
-                    raise ValueError(f"Sample name '{val}' not found. Available names: {self.sample_names}")
+                    raise ValueError(f"Angle '{val}' not found. Available names: {self.sample_names}")
             
-            if(val != 'all') and (type(val) == list):
+            if (val != 'all') and (type(val) == list):
                 if (var == 'sample_name') and (val not in self.sample_names):
                     raise ValueError(f"Sample name '{[name for name in val if name not in self.sample_names]}' not found. Available names: {self.sample_names}")
                 if (var == 'duration') and (val not in self.sample_Durations):
-                    raise ValueError(f"Sample name '{[dur for dur in val if dur not in self.sample_Durations]}' not found. Available names: {self.sample_names}")               
+                    raise ValueError(f"Durations '{[dur for dur in val if dur not in self.sample_Durations]}' not found. Available durations: {self.sample_Durations}")               
                 if (var == 'angle') and (val not in self.sample_angles):
-                    raise ValueError(f"Sample name '{[ang  for ang in val if ang not in self.sample_angles]}' not found. Available names: {self.sample_names}")
-
-
-
-
-
-
-        # if any(name not in self.sample_names for name in sample_name) and sample_name != 'all':
-        #     if type(sample_name) == str:
-        #         errorvalue = sample_name
-        #     if type(sample_name) == list:
-        #         errorvalue = [name for name in sample_name if name not in self.sample_names]
-        #     raise ValueError(f"Sample name '{errorvalue}' not found. Available names: {self.sample_names}")
-            
-        # if any(dur not in self.sample_Durations for dur in duration) and duration != 'all':
-        #     if type(duration) == (int or float):
-        #         errorvalue = duration
-        #     if type(duration) == list:
-        #         errorvalue = [dur  for dur in duration if dur not in self.sample_Durations]
-        #     raise ValueError(f"Duration '{errorvalue}' not found. Available durations: {self.sample_Durations}")
-        
-        # if any(ang not in self.sample_angles for ang in angle) and angle != 'all':
-        #     if type(angle) == (int or float):
-        #         errorvalue = angle
-        #     if type(angle) == list:
-        #         errorvalue = [ang  for ang in angle if ang not in self.sample_angles]
-        #     raise ValueError(f"Angle '{errorvalue}' not found. Available angles: {self.sample_angles}")
-
+                    raise ValueError(f"Angles '{[ang  for ang in val if ang not in self.sample_angles]}' not found. Available angles: {self.sample_angles}")
 
         experiment = {}
+        #filter type of samples 
         if data_type.lower() == 'all':
             data = self.solution_data + self.solvent_kalibration + self.standard_kalibration
         elif data_type.lower() == 'solution':
@@ -265,7 +239,10 @@ class dls_sls_analysis:
         elif data_type.lower() == 'standard':
             data = self.standard_kalibration
         
+        #loop over elements 
         for exp in data:
+            
+
             # angle filter
             if (angle == 'all'):
                 angle_check = True
@@ -274,6 +251,7 @@ class dls_sls_analysis:
             elif type(angle) == list:
                 angle_check = any(ang - 1 < exp.Angle_deg < ang + 1 for ang in angle)
             
+
             # sample name filter
             if (sample_name == 'all'):
                 name_check = True
@@ -289,6 +267,7 @@ class dls_sls_analysis:
                         raise ValueError(f"Sample name '{name}' not found. Available names: {self.sample_names}")
                 name_check = any(name.lower() in exp.Samplename.lower() for name in sample_name)
             
+
             # duration filter
             if (duration == 'all'):
                 duration_check = True
@@ -301,17 +280,17 @@ class dls_sls_analysis:
             elif type(duration) == list:
                 duration_check = any(dur - 1 < exp.Duration_s < dur + 1 for dur in duration)
 
+
             # combine all filters
             if angle_check and name_check and duration_check:
                 experiment[f'{exp.Samplename}_angle{exp.Angle_deg}_dur{exp.Duration_s}'] = exp
-
-            
+                
         return experiment
             
     
         
     
-    def monodisperse(self, angles='all', data_type:str='all'):
+    def monodisperse(self, type=None, data_type:str='all'):
         data = self.get_data(angle=angles, data_type=data_type).values()
         radii = []
         scatter_vec = []
