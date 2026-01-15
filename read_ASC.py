@@ -4,14 +4,17 @@ import seaborn as sns
 import numpy as np
 import os
 from operator import itemgetter
+from jupyter_analysis_tools.utils import (isWindows, isMac, isLinux,
+    isList, pushd, grouper, updatedDict)
+from pathlib import Path
 from from_git.helpers            import *
+from functions import *
+
 
 
 class read_asc:
     def __init__(self, path):
-        print(path)
-
-        self.Path = path
+        self.Path = Path(path)
         self.data = self.ASC_2_dict(self.Path)
 
         self.Date = self.data['Date']
@@ -21,13 +24,17 @@ class read_asc:
         self.SampleMemo = [self.data[f'SampMemo({i})'] for i in range(10)]
 
         self.Temperature_K = float(self.data['Temperature[K]'])
-        self.Viscosity_cp = float(self.data['Viscosity[cp]'])/1000
+        self.Viscosity_cp = float(self.data['Viscosity[cp]'])
         self.Refractive_Index = float(self.data['RefractiveIndex'])
-        self.Wavelength_nm = float(self.data['Wavelength[nm]'])*1e-9
+        self.Wavelength_nm = float(self.data['Wavelength[nm]'])
         self.Angle_deg = float(self.data['Angle[°]'])
-        self.q = (4 * np.pi * self.Refractive_Index / (self.Wavelength_nm)) * np.sin(np.radians(self.Angle_deg) / 2)
+        self.angle_rad = float(np.deg2rad(self.Angle_deg))
+        self.q = (4 * np.pi * self.Refractive_Index / (self.Wavelength_nm/1e9)) * np.sin(self.angle_rad/ 2)
+
+
 
         if 'Cumulant_1' in self.data.keys():
+            self.MonitorDiode = float(self.data['Monitor diode'])
             self.Cumulant_1 = self.data['Cumulant_1']   
             self.Cumulant_2 = self.data['Cumulant_2']
             self.Cumulant_3 = self.data['Cumulant_3']
@@ -40,8 +47,9 @@ class read_asc:
         self.MeanCR0_kHz = float(self.data['MeanCR0[kHz]'])
         self.MeanCR1_kHz = float(self.data['MeanCR1[kHz]'])
 
-        self.Correlationx = np.array(self.data['Correlationx'][1:])
-        self.Correlationy = np.array([val + 1 for val in self.data['Correlationy']][1:])  
+        self.Correlationx = np.array([val * 1e-3 for val in self.data['Correlationx'][5:]])
+        self.Correlationy = np.array([val for val in self.data['Correlationy'][5:]])
+        self.Correlationy = self.Correlationy / max(self.Correlationy)
 
         self.CountRatex = np.array(self.data['CountRatex'])
         self.CountRatey = np.array(self.data['CountRatey'])
@@ -50,17 +58,6 @@ class read_asc:
             self.StandardDeviatiox = np.array(self.data['StandardDeviationx'])
             self.StandardDeviatioy = np.array(self.data['StandardDeviationy'])
 
-
-    def tikhonov_Phillips_fit(self):
-        self.createFittingS_space(0.09,1e6,200)
-        self.getBetaEstimate()
-        self.getG1correlation()
-        self.getInitialEstimates()
-        self.getInitialEstimatesManyAlpha()
-        self.getOptimalAlphaLcurve()
-        self.getInitialEstimatesOptimalAlphaLcurve()
-        self.getInitialEstimatesManyAlpha()
-        self.predictAutocorrelationCurves()
 
     def ASC_2_dict(self, path):
         with open(path, encoding='unicode_escape') as f:
@@ -98,7 +95,7 @@ class read_asc:
 
             elif cor_cou == 1 and (words[i] != 'CountRate'):
                 if len(dict['Correlationx']) <= len(dict['Correlationy']):
-                    dict["Correlationx"].append(float(words[i])/1000)
+                    dict["Correlationx"].append(float(words[i]))
                 else:
                     dict["Correlationy"].append(float(words[i]))
 
@@ -107,6 +104,9 @@ class read_asc:
                     dict["CountRatex"].append(float(words[i]))
                 else:
                     dict["CountRatey"].append(float(words[i]))
+
+            elif words[i] == 'Monitor':
+                dict["Monitor diode"] = words[i+2]
                     
             
             elif cor_cou == 3 and words[i] =='Cumulant1.Order':
@@ -166,8 +166,7 @@ class read_asc:
             elif words[i] == 'StandardDeviation':
                 dict['StandardDeviationx'] = []
                 dict['StandardDeviationy'] = []
-                cor_cou = 4    
-            print(words[i])      
+                cor_cou = 4       
             
 
         return dict
@@ -201,35 +200,34 @@ class read_asc:
         plt.show()
 
     def g2_model(self, tau, beta, Gamma):
-        return beta * np.exp(-2 * Gamma * tau)
+        return beta * np.exp(- 2 * Gamma * tau)
 
     def fit(self):
         corx = self.Correlationx
         cory = self.Correlationy
-        beta0 = max(cory)
-        gamma0 = 1 
+        beta0 = cory[4]
+        gamma0 = 1 / (corx[ np.argmax(cory < beta0*0.5) ])
         # Initial guess: beta=0.5, Gamma=1000 (adjust depending on your data)
         popt, pcov = curve_fit(self.g2_model, corx, cory,
-                               p0=[beta0, gamma0], bounds=(0, np.inf), maxfev=10000)
+                               p0=[beta0, gamma0], maxfev=200000)
         beta, Gamma = popt
         return beta, Gamma
     
     def plot_fit(self):
         beta, Gamma = self.fit()
-        tau_fit = np.logspace(np.log10(min(self.Correlationx)), np.log10(max(self.Correlationx)), 100)
-        g2_fit = self.g2_model(tau_fit, beta, Gamma)
+        g2_fit = self.g2_model(self.Correlationx, beta, Gamma)
         radius = hydrodynamic_radius(self.Refractive_Index,
-                                     self.Wavelength_nm,
+                                     self.Wavelength_nm/1e9,
                                      Gamma,
                                      self.Angle_deg,
                                      self.Temperature_K,
-                                     self.Viscosity_cp)
-        print(f"Fitted parameters: beta = {beta:.3f}, Gamma = {Gamma:.1f}, Hydrodynamic Radius = {radius:.2f} nm")
+                                     self.Viscosity_cp/1e3)
+        print(fr"Fitted parameters: beta = {beta:.3f}, Diff_coef (square micrometer per second) = {Gamma/(self.q**2)*1e12:.5f}, Hydrodynamic Radius = {radius:.2f} nm")
         sns.set_theme()
 
         plt.figure(figsize=(8, 5))
         plt.plot(self.Correlationx, self.Correlationy, 'b.', label='Data')
-        plt.plot(tau_fit, g2_fit, 'r-', label=f'Fit: beta={beta:.3f}, Gamma={Gamma:.1f}')
+        plt.plot(self.Correlationx, g2_fit, 'r-', label=f'Fit: beta={beta:.3f}, Gamma={Gamma:.1f}')
         plt.xscale('log')
         plt.xlabel('Tau (ms)')
         plt.ylabel('g-1')
@@ -238,8 +236,18 @@ class read_asc:
         plt.show()
 
 
-
-    def createFittingS_space(self,lowHr=400,highHr=500,n=100):
+class hide():
+    def tikhonov_Phillips_fit(self):
+        self.createFittingS_space(0.09,1e3,200)
+        self.getBetaEstimate()
+        self.getG1correlation()
+        self.getInitialEstimates()
+        self.getInitialEstimatesManyAlpha()
+        self.getOptimalAlphaLcurve()
+        self.getInitialEstimatesOptimalAlphaLcurve()
+        self.getInitialEstimatesManyAlpha()
+        self.predictAutocorrelationCurves()
+    def createFittingS_space(self,lowHr,highHr,n):
 
         """
 
@@ -388,9 +396,7 @@ class read_asc:
 
             
         betaEst = self.betaGuess
-        print(f'beta guess pass{betaEst}')
         contEst = self.contributionsGuess
-        print(f'self cont pass {contEst}')
 
         # check that we estimated the contributions!
         if len(contEst) > 1:
@@ -444,10 +450,6 @@ class read_asc:
 
         return None
     
-
-    
-
-
 class dls_sls_analysis:
     def __init__(self, dict_path):
         self.dict_path = dict_path
@@ -470,11 +472,11 @@ class dls_sls_analysis:
             if data.Duration_s not in self.sample_durations:
                 self.sample_durations.append(data.Duration_s)
 
-            if round(data.Angle_deg) not in self.sample_angles:
-                self.sample_angles.append(round(data.Angle_deg))
+            if round(data.Angle_deg,2) not in self.sample_angles:
+                self.sample_angles.append(round(data.Angle_deg,2))
 
     
-    def get_data(self, angle='all', data_type='all', sample_name='all', duration='all', indices=None):
+    def get_data(self, angle='all', data_type='all', sample_name='all', duration='all', time='all', indices=None):
         #control if varibles are valid
         search_vars = {'sample_name': sample_name, 'duration': duration,  'angle': angle}
         for var, val in search_vars.items():
@@ -499,6 +501,7 @@ class dls_sls_analysis:
         self.get_sample_durations = []
         self.get_sample_angles = []
         self.get_sample_temperatures = []
+        self.get_sample_times = []
         self.get_sample_viscosities = []
         self.get_sample_wavelengths = []
         self.get_sample_refractive_indeces = []
@@ -512,6 +515,8 @@ class dls_sls_analysis:
             data = self.solvent_kalibration
         elif data_type.lower() == 'standard':
             data = self.standard_kalibration
+        else:
+            raise(ValueError('not valid data type, all, solution, solvent and standard are available'))
         
         i = 0
         #loop over elements 
@@ -521,9 +526,9 @@ class dls_sls_analysis:
             if (angle == 'all'):
                 angle_check = True
             elif type(angle) == int or type(angle) == float:
-                angle_check = angle - 1 < exp.Angle_deg < angle + 1
+                angle_check = angle - 0.01 < exp.Angle_deg < angle + 0.01
             elif type(angle) == list:
-                angle_check = any(ang - 1 < exp.Angle_deg < ang + 1 for ang in angle)
+                angle_check = any(ang - 0.01 < exp.Angle_deg < ang + 0.01 for ang in angle)
             
 
             # sample name filter
@@ -547,9 +552,17 @@ class dls_sls_analysis:
             elif type(duration) == list:
                 duration_check = any(dur - 1 < exp.Duration_s < dur + 1 for dur in duration)
 
+            #time filter
+            if (time == 'all'):
+                time_check = True
+            elif type(time) == str:
+                time_check = time in exp.Time
+            elif type(time) == list:
+                time_check = any(tim in exp.Time for tim in time)
+
 
             # combine all filters 
-            if angle_check and name_check and duration_check:
+            if angle_check and name_check and duration_check and time_check:
                 if exp.Samplename.lower() not in self.get_sample_names:
                     self.get_sample_names.append(exp.Samplename.lower())
 
@@ -570,99 +583,230 @@ class dls_sls_analysis:
 
                 if exp.Refractive_Index not in self.get_sample_refractive_indeces:
                     self.get_sample_refractive_indeces.append(exp.Refractive_Index)
+                
+                if exp.Time not in self.get_sample_times:
+                    self.get_sample_times.append(exp.Time)
 
             
-                experiment[f'{exp.Samplename}, angle {round(exp.Angle_deg)}, dur {round(exp.Duration_s)}, {exp.Date} - {exp.Time}'] = exp
+                experiment[f'{exp.Samplename}, angle {round(exp.Angle_deg)}, dur {round(exp.Duration_s)}, {exp.Time}'] = exp
                 i += 1
+
+        
 
 
         if type(indices) == int:
-            experiment  = itemgetter(*[name for i, name in enumerate(experiment.keys())  if i == indices])(experiment)
+
+            return (*[name for i, name in enumerate(experiment.keys())  if i == indices],itemgetter(*[name for i, name in enumerate(experiment.keys())  if i == indices])(experiment))
 
         elif type(indices) in (float, int, str, list, tuple):
-            raise ValueError(f'expected in or list, not {type(indices)}')
+            raise ValueError(f'expected int, not {type(indices)}')
+        
+        if len(experiment) == 1:
+           return itemgetter(*[name for name in experiment.keys()])(experiment)
 
 
-        return experiment
+        return dict(sorted(experiment.items()))
+
     
 
-    def linear_fit(self, x, y):
-        coeffs = np.polyfit(x, y, 1)
-        slope, intercept = coeffs
-        return slope, intercept
+
+class contin_fit:
+    def __init__(self, path, angle='all', data_type='solution', sample_name='all', duration='all', indices=None, continConfig:dict=None):
+        self.path = path
+        dls_data = dls_sls_analysis(self.path)
+        if indices:
+            self.data = dls_data.get_data(angle=angle, data_type=data_type, sample_name=sample_name, duration=duration, indices=indices)
+        else:
+            self.data = [i for i in dls_data.get_data(angle=angle, data_type=data_type, sample_name=sample_name, duration=duration, indices=indices).items()]
+        self.sample_names = dls_data.get_sample_names
+        self.durations = dls_data.get_sample_durations
+        self.angles = dls_data.get_sample_angles
+        self.time = dls_data.get_sample_times
+
+        
+        if continConfig is not None:
+            self.contin_config = continConfig
+        else:
+            self.contin_config = dict(recalc=True,
+                                    ptRangeSec=(5e-7, 1e0), fitRangeM=(200e-9, 300e-9), gridpts=500,
+                                    transformData=True, baselineCoeffs=1, # N_L
+                                    # weighs noise level of data points accordinly for photon correlation spectroscopy
+                                    # where the variance of Y is proportional to (Y**2+1)/(4*Y**2)
+                                    # (from contin.for, line 1430)
+                                    weighResiduals=True)
+          
+        self.fitRangeCrop = 30
+        if 0 < self.fitRangeCrop < 100:
+            self.contin_config['fitRangeM'] = (
+                self.contin_config['fitRangeM'][0] * (1 - self.fitRangeCrop/100),
+                self.contin_config['fitRangeM'][1] * (1 + self.fitRangeCrop/100),
+    )
+    
+    def run_contin(self):
+        resultDirs, summary = runContinOverFiles(self.data, self.contin_config)
+        self.resultDirs = resultDirs
+        self.summary = summary
+        return resultDirs, summary
+    
+    def filter_results(self, angle='all', sample_name='all', duration='all', time='all',filter=None):
+        filtered_results = []
+
+        if filter:
+            angle = filter.get('angle', angle)
+            sample_name = filter.get('sample_name', sample_name)
+            duration = filter.get('duration', duration)
+            time = filter.get('time', time)
+
+        for dn in self.resultDirs:
+            angle_check = (angle == 'all') or (f'angle {angle}' in dn.name.lower())
+            name_check = (sample_name == 'all') or (sample_name.lower() in dn.name.lower())
+            duration_check = (duration == 'all') or (f'dur {duration}' in dn.name.lower())
+            time_check = (time == 'all') or (time in dn.name)
+            if angle_check and name_check and duration_check and time_check:
+                filtered_results.append(dn)
+        if not filtered_results:
+            raise ValueError("No results match the specified filters.")
+        return filtered_results
+    
+    def get_contin_result(self, dn=None, filter:dict=None,Number=None, volume=None):
+        if dn is None and filter is None:
+            result= {}
+            for dn in self.resultDirs:
+                print(dn)
+                dfDistrib, dfFit, varmap = getContinResults(dn)
+                dfDistrib['radius(nm)'] = dfDistrib['decay'] * varmap["gamma"]*1e9
+                r_min = min(dfDistrib['radius(nm)']) * (1 + self.fitRangeCrop/100)
+                r_max = max(dfDistrib['radius(nm)']) * (1 - self.fitRangeCrop/100)
+
+                dfDistrib = dfDistrib[
+                    (dfDistrib['radius(nm)'] > r_min) &
+                    (dfDistrib['radius(nm)'] < r_max)
+                ][['radius(nm)', 'distrib', 'err']]
+                if Number == False and volume == False:
+                    raise ValueError("Please provide either Number=True or volume=True to get specific distribution.")
+                elif Number == True:
+                    dfDistrib['distrib'] = dfDistrib['distrib']/dfDistrib['radius(nm)']**6
+                    
+                elif volume == True:
+                    dfDistrib['distrib'] = dfDistrib['distrib']/dfDistrib['radius(nm)']**3
+                dfDistrib['distrib'] /= dfDistrib['distrib'].sum()
+
+                result[dn.name] = (dfDistrib, dfFit, varmap)
+
+                
+
+            return result
+        
+        elif dn is not None:
+            if dn not in self.resultDirs:
+                raise ValueError(f"The {dn}is not in the resultDirs. Please run run_contin() first or provide existing path.")
+            dfDistrib, dfFit, varmap = getContinResults(dn)
+            dfDistrib['radius(nm)'] = dfDistrib['decay'] * varmap["gamma"]*1e9
+            r_min = min(dfDistrib['radius(nm)']) * (1 + self.fitRangeCrop/100)
+            r_max = max(dfDistrib['radius(nm)']) * (1 - self.fitRangeCrop/100)
+
+            dfDistrib = dfDistrib[
+                (dfDistrib['radius(nm)'] > r_min) &
+                (dfDistrib['radius(nm)'] < r_max)
+            ][['radius(nm)', 'distrib', 'err']]
+            if Number == False and volume == False:
+                raise ValueError("Please provide either Number=True or volume=True to get specific distribution.")
+            elif Number == True:
+                dfDistrib['distrib'] = dfDistrib['distrib']/dfDistrib['radius(nm)']**6
+            
+            elif volume == True:
+                dfDistrib['distrib'] = dfDistrib['distrib']/dfDistrib['radius(nm)']**3
+            dfDistrib['distrib'] /= dfDistrib['distrib'].sum()
+
+            return dfDistrib, dfFit, varmap
+        
+        elif filter is not None:
+            filtered_results = self.filter_results(filter = filter)
+            result = {}
+            for dn in filtered_results:
+                dfDistrib, dfFit, varmap = getContinResults(dn)
+                dfDistrib['radius(nm)'] = dfDistrib['decay'] * varmap["gamma"]*1e9
+                r_min = min(dfDistrib['radius(nm)']) * (1 + self.fitRangeCrop/100)
+                r_max = max(dfDistrib['radius(nm)']) * (1 - self.fitRangeCrop/100)
+
+                dfDistrib = dfDistrib[
+                    (dfDistrib['radius(nm)'] > r_min) &
+                    (dfDistrib['radius(nm)'] < r_max)
+                ][['radius(nm)', 'distrib', 'err']]
+
+                result[dn.name] = (dfDistrib, dfFit, varmap)
+                if Number == False and volume == False:
+                    raise ValueError("Please provide either Number=True or volume=True to get specific distribution.")
+                elif Number == True:
+                    dfDistrib['distrib'] = dfDistrib['distrib']/dfDistrib['radius(nm)']**6
+                elif volume == True:
+                    dfDistrib['distrib'] = dfDistrib['distrib']/dfDistrib['radius(nm)']**3
+                dfDistrib['distrib'] /= dfDistrib['distrib'].sum()
+
+            return result
+        
+        else:
+            raise ValueError("Please provide either dn or filter to get specific results.")
+        
+       
+    
+    def plot_contin_results(self, dn=None, filter:dict=None):
+        if dn is None and filter is None:
+            for dn, (dfDistrib, dfFit, varmap) in self.get_contin_result().items():
+                sns.set_theme()
+
+      
+                plt.plot(dfDistrib['radius(nm)'], dfDistrib['distrib'], label=dn)
+                plt.xlabel('Hydrodynamic Radius (nm)')
+                plt.ylabel('Distribution')
+                plt.xlim(dfDistrib['radius(nm)'].min()*(1+self.fitRangeCrop/100), dfDistrib['radius(nm)'].max()*(1-self.fitRangeCrop/100))
+                plt.title(f'hdr {dfDistrib["radius(nm)"][dfDistrib["distrib"]==max(dfDistrib["distrib"])].values} nm')
+                plt.errorbar(dfDistrib['radius(nm)'], dfDistrib['distrib'], yerr=dfDistrib['err'], fmt='o', alpha=0.5)
+                plt.grid()
+                plt.legend()
+                plt.show()
+
+
+
+        # dfDistrib, dfFit, varmap = self.get_contin_result(dn)
+
+        # plt.plot(dfDistrib['radius'], dfDistrib['distrib'], label=dn.name)
+        # plt.xlabel('Hydrodynamic Radius (nm)')
+        # plt.ylabel('Distribution')
+        # plt.title(f'hdr {dfDistrib["radius"][dfDistrib["distrib"]==max(dfDistrib["distrib"])].values} nm')
+        # plt.errorbar(dfFit['tau'], dfFit['g2_fit'], yerr=dfFit['g2_fit_std'], fmt='o', label='Fitted g2', alpha=0.5)
+        # plt.grid()
+        # plt.legend()
+        # plt.show()
+
+
+        # varmap
+
+        # print(dfDistrib['radius'][dfDistrib['distrib']==max(dfDistrib['distrib'])].values)
     
 
-    def true_size(self, sol:dict = None, angle= 'all', interval:list = [float('-inf'), float('inf')]):
-        data = self.get_data(data_type='solution', angle=angle)
-        angle_dict = {}
-
-        if angle == 'all':
-            for val in self.sample_angles:
-                angle_dict[round(val)] = {'concentration' : [],
-                                          'gamma' : [],
-                                          'beta' : [],
-                                          'radius' : []}
-        
-        elif type(angle) == list:
-            for val in angle:
-                angle_dict[round(val)] = {'concentration' : [],
-                                          'gamma' : [],
-                                          'beta' : [],
-                                          'radius' : []}
-        
-        elif type(angle) == int or type(angle) == float:
-            angle_dict[round(angle)] = {'concentration' : [],
-                                        'gamma' : [],
-                                        'beta' : [],
-                                        'radius' : []}
-            
-        # if len(sol.keys() & self.sample_names) != len(sol.keys()):
-        #     raise ValueError(f"Some sample names in 'sol' do not match available sample names: {self.sample_names}")
 
 
-        for val in data.values():
-            for key in sol.keys():
-                    if key.lower() in val.Samplename.lower():
-                        angle_dict[round(val.Angle_deg)]['concentration'].append(sol[key])
-                        angle_dict[round(val.Angle_deg)]['gamma'].append(val.fit()[1])
-                        angle_dict[round(val.Angle_deg)]['beta'].append(val.fit()[0])
-        
-        gamma_pred = {}
-
-        for degree in self.sample_angles:
-            slope, intercept = self.linear_fit([val for val in angle_dict[round(degree)]['concentration'] if interval[0]<=  val <= interval[1]], [val for i, val in enumerate(angle_dict[round(degree)]['gamma']) if interval[0] <= angle_dict[round(degree)]['concentration'][i] <= interval[1]])
-            
-            radius = hydrodynamic_radius(refractive_index=np.mean(self.sample_refractive_indeces),
-                                            wavelength=np.mean(self.sample_wavelengths),
-                                            Gamma=intercept,
-                                            angle_deg=degree,
-                                            temperature=np.mean(self.sample_temperatures),
-                                            viscosity=np.mean(self.sample_viscosities))
-            angle_dict[round(degree)]['radius'] = radius
-            gamma_pred[degree] = predict_gamma(refractive_index=np.mean(self.sample_refractive_indeces),
-                                            wavelength=np.mean(self.sample_wavelengths),
-                                            radius=465,
-                                            angle_deg=degree,
-                                            temperature=np.mean(self.sample_temperatures),
-                                            viscosity=np.mean(self.sample_viscosities))
-
-
-
-
-        return gamma_pred, angle_dict
-
-# def hydrodynamic_radius(refractive_index, wavelength, Gamma, angle_deg, temperature, viscosity):
-#     q = (4 * np.pi * refractive_index / (wavelength)) * np.sin(np.radians(angle_deg) / 2)
-#     D = Gamma / (q ** 2)
-#     R_h = (1.38e-23 * temperature) / (6 * np.pi * viscosity * D)*1e9  # in nm
-#     return R_h
-
-def predict_gamma(refractive_index, wavelength, radius, angle_deg, temperature, viscosity):
+def hydrodynamic_radius(refractive_index, wavelength, Gamma, angle_deg, temperature, viscosity):
     q = (4 * np.pi * refractive_index / (wavelength)) * np.sin(np.radians(angle_deg) / 2)
-    gamma = (1.38e-23 * temperature) / (6 * np.pi * viscosity * radius * 1e-9)  # in 1/s
-    return gamma
+    D = Gamma / (q ** 2)
+    R_h = (1.38e-23 * temperature) / (6 * np.pi * viscosity * D)*1e9  # in nm
+    return R_h
 
+# def predict_gamma(refractive_index, wavelength, radius, angle_deg, temperature, viscosity):
+#     q = (4 * np.pi * refractive_index / (wavelength)) * np.sin(np.radians(angle_deg) / 2)
+#     gamma = (1.38e-23 * temperature) / (6 * np.pi * viscosity * radius * 1e-9)  # in 1/s
+#     return gamma
 
+# def ks_from_theta(theta):
+#     """Assume phi = 0 plane (x-z plane). theta in radians."""
+#     return np.array([np.sin(theta), 0.0, np.cos(theta)])
 
+# def q_from_ki_ks(ki, ks):
+#     cos_theta = np.clip(np.dot(ki, ks), -1.0, 1.0)
+#     theta = np.arccos(cos_theta)
+#     q = np.sin(theta/2.0)
+#     return q
 
-    
+# class contin_analysis()
+#     def __init__(self, path, filter,)
