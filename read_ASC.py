@@ -609,19 +609,30 @@ class dls_sls_analysis:
 
     
 
+class contin_fit(dls_sls_analysis):
+    def __init__(self, path, angle='all', data_type='solution',
+                 sample_name='all', duration='all', indices=None,
+                 continConfig=None):
 
-class contin_fit:
-    def __init__(self, path, angle='all', data_type='solution', sample_name='all', duration='all', indices=None, continConfig:dict=None):
-        self.path = path
-        dls_data = dls_sls_analysis(self.path)
-        if indices:
-            self.data = dls_data.get_data(angle=angle, data_type=data_type, sample_name=sample_name, duration=duration, indices=indices)
+        super().__init__(path)
+
+        if indices is not None:
+            self.data = self.get_data(
+                angle=angle,
+                data_type=data_type,
+                sample_name=sample_name,
+                duration=duration,
+                indices=indices
+            )
         else:
-            self.data = [i for i in dls_data.get_data(angle=angle, data_type=data_type, sample_name=sample_name, duration=duration, indices=indices).items()]
-        self.sample_names = dls_data.get_sample_names
-        self.durations = dls_data.get_sample_durations
-        self.angles = dls_data.get_sample_angles
-        self.time = dls_data.get_sample_times
+            self.data = list(
+                self.get_data(
+                    angle=angle,
+                    data_type=data_type,
+                    sample_name=sample_name,
+                    duration=duration
+                ).items()
+            )
 
         
         if continConfig is not None:
