@@ -4,451 +4,332 @@ import seaborn as sns
 import numpy as np
 import os
 from operator import itemgetter
-from jupyter_analysis_tools.utils import (isWindows, isMac, isLinux,
-    isList, pushd, grouper, updatedDict)
 from pathlib import Path
 from functions import *
 
 
 
 class read_asc:
+    """
+    Read and analyze DLS .ASC files.
+
+    This class:
+    - Parses the raw ASCII file produced by the DLS instrument
+    - Extracts metadata (temperature, angle, viscosity, etc.)
+    - Extracts correlation and count-rate data
+    - Fits a single-exponential decay to obtain diffusion parameters
+    """
+
     def __init__(self, path):
+        """
+        Parameters
+        ----------
+        path : str or Path
+            Path to the .ASC file
+        """
+
+        # Store file path
         self.Path = Path(path)
+
+        # Read and parse the ASCII file into a dictionary
         self.data = self.ASC_2_dict(self.Path)
 
+        # Measurement date and time
         self.Date = self.data['Date']
         self.Time = self.data['Time']
 
+        # Sample identification
         self.Samplename = self.data['Samplename']
         self.SampleMemo = [self.data[f'SampMemo({i})'] for i in range(10)]
 
-        self.Temperature_K = float(self.data['Temperature[K]'])
-        self.Viscosity_cp = float(self.data['Viscosity[cp]'])
-        self.Refractive_Index = float(self.data['RefractiveIndex'])
-        self.Wavelength_nm = float(self.data['Wavelength[nm]'])
-        self.Angle_deg = float(self.data['Angle[°]'])
-        self.angle_rad = float(np.deg2rad(self.Angle_deg))
-        self.q = (4 * np.pi * self.Refractive_Index / (self.Wavelength_nm/1e9)) * np.sin(self.angle_rad/ 2)
+        # Experimental conditions
+        self.Temperature_K = float(self.data['Temperature[K]'])     # Temperature in Kelvin
+        self.Viscosity_cp = float(self.data['Viscosity[cp]'])       # Viscosity in centipoise
+        self.Refractive_Index = float(self.data['RefractiveIndex']) # Solvent refractive index
+        self.Wavelength_nm = float(self.data['Wavelength[nm]'])     # Laser wavelength
+        self.Angle_deg = float(self.data['Angle[°]'])               # Scattering angle
 
+        # Convert angle to radians
+        self.angle_rad = np.deg2rad(self.Angle_deg)
 
+        # Scattering vector magnitude q
+        self.q = (
+            4 * np.pi * self.Refractive_Index / (self.Wavelength_nm / 1e9)
+        ) * np.sin(self.angle_rad / 2)
 
-        if 'Cumulant_1' in self.data.keys():
+        # Optional cumulant analysis data (if present)
+        if 'Cumulant_1' in self.data:
             self.MonitorDiode = float(self.data['Monitor diode'])
-            self.Cumulant_1 = self.data['Cumulant_1']   
+            self.Cumulant_1 = self.data['Cumulant_1']
             self.Cumulant_2 = self.data['Cumulant_2']
             self.Cumulant_3 = self.data['Cumulant_3']
 
-
+        # Measurement settings
         self.Duration_s = float(self.data['Duration[s]'])
         self.Runs = float(self.data['Runs'])
         self.Mode = self.data['Mode']
 
+        # Mean count rates
         self.MeanCR0_kHz = float(self.data['MeanCR0[kHz]'])
         self.MeanCR1_kHz = float(self.data['MeanCR1[kHz]'])
 
-        self.Correlationx = np.array([val * 1e-3 for val in self.data['Correlationx'][5:]])
-        self.Correlationy = np.array([val for val in self.data['Correlationy'][5:]])
-        self.Correlationy = self.Correlationy / max(self.Correlationy)
+        # Autocorrelation function g2(tau)
+        # Skip first 5 points (typically noisy)
+        # Convert time from microseconds to milliseconds
+        self.Correlationx = np.array(
+            [val * 1e-3 for val in self.data['Correlationx'][5:]]
+        )
+        self.Correlationy = np.array(self.data['Correlationy'][5:])
 
+        # Normalize correlation to its maximum value
+        self.Correlationy /= self.Correlationy.max()
+
+        # Photon count rate vs time
         self.CountRatex = np.array(self.data['CountRatex'])
         self.CountRatey = np.array(self.data['CountRatey'])
 
-        if 'StandardDeviationx' in self.data.keys():
+        # Optional standard deviation data
+        if 'StandardDeviationx' in self.data:
             self.StandardDeviatiox = np.array(self.data['StandardDeviationx'])
             self.StandardDeviatioy = np.array(self.data['StandardDeviationy'])
 
-
     def ASC_2_dict(self, path):
+        """
+        Parse a DLS .ASC file into a Python dictionary.
+
+        The .ASC file is space-separated and poorly structured,
+        so this method manually tokenizes the file and reconstructs
+        the data blocks (metadata, correlation, count rate, cumulants).
+
+        Returns
+        -------
+        dict
+            Dictionary containing all extracted data
+        """
+
+        # Read raw file content
         with open(path, encoding='unicode_escape') as f:
             data = f.read()
         
-        word, j, words = str(), str(), []
+        # Tokenize the file word by word
+        word, previous_char, words = str(), str(), []
 
-        for i in data:
-            if (((i == " ") and (i != j) ) or ((i == "\n") or (i == '\t'))):
+        for char in data:
+            # Split on whitespace, newline or tab
+            if (((char == " ") and (char != previous_char) ) or ((char == "\n") or (char == '\t'))):
+                # Ignore unfinished quoted strings
                 if word.count('"') == 1:
                     continue
 
+                # Fix "Index:" keyword naming
                 elif word == 'Index:':
                     words[-1] = 'RefractiveIndex'
                     words.append(":")
                     word = str()
 
+                # Store completed words
                 elif (word != ''):
                     word = word.replace('"','')
                     words.append(word)
                     word = str()
             
-            elif (i != " ") and ((i != "\t") or (i != "\n")):
-                word += i
-            j = i
+            elif (char != " ") and ((char != "\t") or (char != "\n")):
+                word += char
+            previous_char = char
 
+# cor_cou controls which data block we are reading
+        # 0 = metadata
+        # 1 = correlation
+        # 2 = count rate
+        # 3 = cumulants
+        # 4 = standard deviation
         cor_cou = 0
-        dict = {}
+        result = {}
+
         for i in range(len(words)):
-            if (words[i] == ':') and (words[i-4] == ':'):
-                dict[words[i-2]+words[i-1]] = words[i+1]
+
+            # Standard key:value entries
+            if words[i] == ':' and words[i - 4] == ':':
+                result[words[i - 2] + words[i - 1]] = words[i + 1]
 
             elif words[i] == ':':
-                dict[words[i-1]] = words[i+1]
+                result[words[i - 1]] = words[i + 1]
 
-            elif cor_cou == 1 and (words[i] != 'CountRate'):
-                if len(dict['Correlationx']) <= len(dict['Correlationy']):
-                    dict["Correlationx"].append(float(words[i]))
+            # Correlation function data
+            elif cor_cou == 1 and words[i] != 'CountRate':
+                if len(result['Correlationx']) <= len(result['Correlationy']):
+                    result['Correlationx'].append(float(words[i]))
                 else:
-                    dict["Correlationy"].append(float(words[i]))
+                    result['Correlationy'].append(float(words[i]))
 
-            elif cor_cou == 2 and (words[i] != 'Monitor') and (words[i] != 'StandardDeviation'):
-                if len(dict['CountRatex']) <= len(dict['CountRatey']):
-                    dict["CountRatex"].append(float(words[i]))
+            # Count rate data
+            elif cor_cou == 2 and words[i] not in ('Monitor', 'StandardDeviation'):
+                if len(result['CountRatex']) <= len(result['CountRatey']):
+                    result['CountRatex'].append(float(words[i]))
                 else:
-                    dict["CountRatey"].append(float(words[i]))
+                    result['CountRatey'].append(float(words[i]))
 
+            # Monitor diode value
             elif words[i] == 'Monitor':
-                dict["Monitor diode"] = words[i+2]
-                    
-            
-            elif cor_cou == 3 and words[i] =='Cumulant1.Order':
-                dict['Cumulant_1']['Fluc_Freq'] = float(words[i+3])
-                dict['Cumulant_1']['Diff_Cof'] =float(words[i+6])
-                dict['Cumulant_1']['Hydr_Rad'] = float(words[i+10])
-            
+                result['Monitor diode'] = words[i + 2]
+
+            # Cumulant analysis blocks
+            elif cor_cou == 3 and words[i] == 'Cumulant1.Order':
+                result['Cumulant_1']['Fluc_Freq'] = float(words[i + 3])
+                result['Cumulant_1']['Diff_Cof'] = float(words[i + 6])
+                result['Cumulant_1']['Hydr_Rad'] = float(words[i + 10])
+
             elif cor_cou == 3 and words[i] == 'Cumulant2.Order':
-                dict['Cumulant_2']['Fluc_Freq'] = float(words[i+3])
-                dict['Cumulant_2']['Diff_Cof'] = float(words[i+6])
-                dict['Cumulant_2']['Hydr_Rad'] = float(words[i+10])
-                dict['Cumulant_2']['Exp_Par_2'] = float(words[i+14])
+                result['Cumulant_2']['Fluc_Freq'] = float(words[i + 3])
+                result['Cumulant_2']['Diff_Cof'] = float(words[i + 6])
+                result['Cumulant_2']['Hydr_Rad'] = float(words[i + 10])
+                result['Cumulant_2']['Exp_Par_2'] = float(words[i + 14])
 
             elif cor_cou == 3 and words[i] == 'Cumulant3.Order':
-                dict['Cumulant_3']['Fluc_Freq'] = float(words[i+3])
-                dict['Cumulant_3']['Diff_Cof'] = float(words[i+6])
-                dict['Cumulant_3']['Hydr_Rad'] = float(words[i+10])
-                dict['Cumulant_3']['Exp_Par_2'] = float(words[i+14])
-                dict['Cumulant_3']['Exp_Par_3'] = float(words[i+18])
+                result['Cumulant_3']['Fluc_Freq'] = float(words[i + 3])
+                result['Cumulant_3']['Diff_Cof'] = float(words[i + 6])
+                result['Cumulant_3']['Hydr_Rad'] = float(words[i + 10])
+                result['Cumulant_3']['Exp_Par_2'] = float(words[i + 14])
+                result['Cumulant_3']['Exp_Par_3'] = float(words[i + 18])
 
+            # Standard deviation data
             elif cor_cou == 4:
-                if len(dict['StandardDeviationx']) <= len(dict['StandardDeviationy']):
-                    dict["StandardDeviationx"].append(float(words[i]))
+                if len(result['StandardDeviationx']) <= len(result['StandardDeviationy']):
+                    result['StandardDeviationx'].append(float(words[i]))
                 else:
-                    dict["StandardDeviationy"].append(float(words[i]))
+                    result['StandardDeviationy'].append(float(words[i]))
 
+            # Detect start of each data block
             if words[i] == 'Correlation':
-                dict['Correlationx'] = []
-                dict['Correlationy'] = []
+                result['Correlationx'], result['Correlationy'] = [], []
                 cor_cou = 1
 
             elif words[i] == 'CountRate':
-                dict['CountRatex'] = []
-                dict['CountRatey'] = []
+                result['CountRatex'], result['CountRatey'] = [], []
                 cor_cou = 2
 
             elif words[i] == 'Monitor':
-                dict['Cumulant_1'] ={'Fluc_Freq':0,
-                                     'Diff_Cof': 0,
-                                     'Hydr_Rad': 0}
-
-                dict['Cumulant_2'] = {'Fluc_Freq':0,
-                                     'Diff_Cof': 0,
-                                     'Hydr_Rad': 0,
-                                     'Exp_Par_2' : 0}
-
-                dict['Cumulant_3'] = {'Fluc_Freq':0,
-                                     'Diff_Cof': 0,
-                                     'Hydr_Rad': 0,
-                                     'Exp_Par_2' : 0,
-                                     'Exp_Par_3': 0
-                                     }
+                result['Cumulant_1'] = {'Fluc_Freq': 0, 'Diff_Cof': 0, 'Hydr_Rad': 0}
+                result['Cumulant_2'] = {'Fluc_Freq': 0, 'Diff_Cof': 0, 'Hydr_Rad': 0, 'Exp_Par_2': 0}
+                result['Cumulant_3'] = {'Fluc_Freq': 0, 'Diff_Cof': 0, 'Hydr_Rad': 0,
+                                        'Exp_Par_2': 0, 'Exp_Par_3': 0}
                 cor_cou = 3
 
-                
-
             elif words[i] == 'StandardDeviation':
-                dict['StandardDeviationx'] = []
-                dict['StandardDeviationy'] = []
-                cor_cou = 4       
-            
+                result['StandardDeviationx'], result['StandardDeviationy'] = [], []
+                cor_cou = 4
 
-        return dict
-    
-    def quick_plot_cor(self, title:str='name'):
-        if title.lower() == 'angle':
-            title_str = f'correlation of angle{self.Angle_deg}'
-        elif title.lower() == 'name':
-            title_str = f'correlation of {self.Samplename}'
+        return result
 
-    
+    # ------------------------------------------------------------------
+
+    def quick_plot_cor(self, title='name'):
+        """
+        Plot the normalized autocorrelation function g2(tau)
+        """
+
+        title_str = (
+            f'correlation of angle {self.Angle_deg}'
+            if title.lower() == 'angle'
+            else f'correlation of {self.Samplename}'
+        )
+
         sns.set_theme()
         plt.plot(self.Correlationx, self.Correlationy)
-        plt.title(title_str)
         plt.xscale('log')
         plt.xlabel('Tau (ms)')
-        plt.ylabel('correlation')
+        plt.ylabel('Correlation')
+        plt.title(title_str)
         plt.show()
-    
-    def quick_plot_count(self, title:str='name'):
-        if title.lower() == 'angle':
-            title_str = f'countrate of angle {self.Angle_deg}'
-        elif title.lower() == 'name':
-            title_str = f'countrate of {self.Samplename}'
+
+    def quick_plot_count(self, title='name'):
+        """
+        Plot the photon count rate vs time
+        """
+
+        title_str = (
+            f'countrate of angle {self.Angle_deg}'
+            if title.lower() == 'angle'
+            else f'countrate of {self.Samplename}'
+        )
 
         sns.set_theme()
         plt.plot(self.CountRatex, self.CountRatey)
+        plt.xlabel('Time (s)')
+        plt.ylabel('Count rate')
         plt.title(title_str)
-        plt.xlabel('time (s)')
-        plt.ylabel('rate (-)')
         plt.show()
 
+    # ------------------------------------------------------------------
+
     def g2_model(self, tau, beta, Gamma):
-        return beta * np.exp(- 2 * Gamma * tau)
+        """
+        Single-exponential model for g2(tau) - 1
+        """
+        return beta * np.exp(-2 * Gamma * tau)
 
     def fit(self):
-        corx = self.Correlationx
-        cory = self.Correlationy
-        beta0 = cory[4]
-        gamma0 = 1 / (corx[ np.argmax(cory < beta0*0.5) ])
-        # Initial guess: beta=0.5, Gamma=1000 (adjust depending on your data)
-        popt, pcov = curve_fit(self.g2_model, corx, cory,
-                               p0=[beta0, gamma0], maxfev=200000)
-        beta, Gamma = popt
-        return beta, Gamma
-    
+        """
+        Fit the correlation function with a single-exponential decay.
+
+        Returns
+        -------
+        beta : float
+            Intercept (coherence factor)
+        Gamma : float
+            Decay rate (1/s)
+        """
+
+        beta0 = self.Correlationy[4]
+        gamma0 = 1 / self.Correlationx[np.argmax(self.Correlationy < beta0 * 0.5)]
+
+        popt, _ = curve_fit(
+            self.g2_model,
+            self.Correlationx,
+            self.Correlationy,
+            p0=[beta0, gamma0],
+            maxfev=200000
+        )
+
+        return popt
+
     def plot_fit(self):
+        """
+        Plot experimental data together with fitted correlation curve
+        and report hydrodynamic radius.
+        """
+
         beta, Gamma = self.fit()
         g2_fit = self.g2_model(self.Correlationx, beta, Gamma)
-        radius = hydrodynamic_radius(self.Refractive_Index,
-                                     self.Wavelength_nm/1e9,
-                                     Gamma,
-                                     self.Angle_deg,
-                                     self.Temperature_K,
-                                     self.Viscosity_cp/1e3)
-        print(fr"Fitted parameters: beta = {beta:.3f}, Diff_coef (square micrometer per second) = {Gamma/(self.q**2)*1e12:.5f}, Hydrodynamic Radius = {radius:.2f} nm")
-        sns.set_theme()
 
+        radius = hydrodynamic_radius(
+            self.Refractive_Index,
+            self.Wavelength_nm / 1e9,
+            Gamma,
+            self.Angle_deg,
+            self.Temperature_K,
+            self.Viscosity_cp / 1e3
+        )
+
+        print(
+            f"Fitted parameters:\n"
+            f"  beta = {beta:.3f}\n"
+            f"  Diffusion coefficient = {Gamma / self.q**2 * 1e12:.5f} µm²/s\n"
+            f"  Hydrodynamic radius = {radius:.2f} nm"
+        )
+
+        sns.set_theme()
         plt.figure(figsize=(8, 5))
         plt.plot(self.Correlationx, self.Correlationy, 'b.', label='Data')
-        plt.plot(self.Correlationx, g2_fit, 'r-', label=f'Fit: beta={beta:.3f}, Gamma={Gamma:.1f}')
+        plt.plot(self.Correlationx, g2_fit, 'r-', label='Fit')
         plt.xscale('log')
         plt.xlabel('Tau (ms)')
-        plt.ylabel('g-1')
-        plt.title(f'Fit for {self.Samplename} at angle {self.Angle_deg}°')
+        plt.ylabel('g₂ − 1')
+        plt.title(f'{self.Samplename} at {self.Angle_deg}°')
         plt.legend()
         plt.show()
 
-
-class hide():
-    def tikhonov_Phillips_fit(self):
-        self.createFittingS_space(0.09,1e3,200)
-        self.getBetaEstimate()
-        self.getG1correlation()
-        self.getInitialEstimates()
-        self.getInitialEstimatesManyAlpha()
-        self.getOptimalAlphaLcurve()
-        self.getInitialEstimatesOptimalAlphaLcurve()
-        self.getInitialEstimatesManyAlpha()
-        self.predictAutocorrelationCurves()
-    def createFittingS_space(self,lowHr,highHr,n):
-
-        """
-
-        Create the s (inverse of gamma decay rate) space that will be used for the fitting
-        The limits are given by the minimum and maximum desired hydrodynamic radius (in nanometers)
-        
-        Run after getQ()!
-
-        """
-        n = int(n) # Convert n to integer type for the np.logspace function
-
-
-        sUpLimitHigh  = s_inverse_decay_rate(
-            diffusion_from_hydrodynamic_radius(highHr/1e9,self.Temperature_K,self.Viscosity_cp), self.q)
-
-        sUpLimitLow   = s_inverse_decay_rate(
-            diffusion_from_hydrodynamic_radius(lowHr/1e9,self.Temperature_K,self.Viscosity_cp), self.q)
-
-        # Sequence in linear space! 10.0**start to 10**stop
-        self.s_space     = np.logspace(np.log10(sUpLimitLow),np.log10(sUpLimitHigh), n) 
-
-        self.ds          = diffusion_from_inverse_decay_rate(self.s_space,self.q)
-        self.hrs         = hydrodynamic_radius(self.ds ,self.Temperature_K,self.Viscosity_cp)*1e9  # In nanometers
-
-        return None
-    
-    def getBetaEstimate(self):
-
-        """
-        Fit a polynomial of degree 2 to the first 5 microseconds of data
-        """
-
-        self.betaGuess               = get_beta_prior(self.Correlationy,self.Correlationx) 
-
-        return None
-    
-
-    def getG1correlation(self):
-
-        """ 
-        Calculate the first order autocorrelation function g1
-        """
-        
-        self.g1              = np.array([g1_from_g2(self.Correlationy[i],self.betaGuess) for i in range(len(self.Correlationy))])
-
-        return None
-
-
-    def getInitialEstimates(self,alpha=0.1,timeLimit=1e8):
-
-        """
-
-        Obtain initial estimates for the relative contributions
-
-        Run after createFittingS_space() !
-
-        timeLimit should be given in microseconds! Default time is 100 seconds (all the autocorrelation curve).
-
-        alpha can be one value (same for all curves) or a list of values (one value per curve)
-    
-        """
  
-        selectedTimes = self.Correlationx < (timeLimit / 1e6)
-
-        # Return the fitted contributions and residuals of the first order autocorrelation function
-        self.contributionsGuess, self.residualsG1, _   = get_contributios_prior(
-            self.g1[selectedTimes],self.Correlationx[selectedTimes],self.s_space,self.betaGuess,alpha) 
-
-        return None
-    
-
-    def getInitialEstimatesManyAlpha(self, alphaVec=(5**np.arange(-6,2,0.1,dtype=float))**2,timeLimit=1e8):
-
-        """
-        Apply the Tikhonov Philips regularisation for a given set of different values of alpha
-        Useful to get afterwards the optimal alpha according to the L-curve criteria
-
-        Result:
-
-            We add curvesResidualNorm, curvesPenaltyNorm & alphaVec to the class object
-
-            curvesResidualNorm contains the norm of the fidelity     term 
-            curvesPenaltyNorm  contains the norm of the penalization term 
-            alphaVec           contains the explored values of alpha
-
-        """
-
-        selectedTimes = self.Correlationx < (timeLimit / 1e6)
-
-        curvesResidualNorm, curvesPenaltyNorm = [],[]
-
-        self.alphaVec           = alphaVec
-
-        # Iterate over the vector with different values of alpha
-        for alpha in alphaVec:
-
-            _ , residualNorm, penaltyNorm = get_contributios_prior(
-                self.g1[selectedTimes],self.Correlationx[selectedTimes],
-                self.s_space,self.betaGuess,alpha) 
-          
-            curvesResidualNorm.append(residualNorm) # List (one element per alpha) of lists (one element per curve)
-            curvesPenaltyNorm.append(penaltyNorm)   # List (one element per alpha) of lists (one element per curve)
-
-        self.curvesResidualNorm = np.array(curvesResidualNorm) # One row per alpha, one column per curve
-        self.curvesPenaltyNorm  = np.array(curvesPenaltyNorm)  # One row per alpha, one column per curve
-
-        return None
-    
-    def getOptimalAlphaLcurve(self):
-
-        """
-        Apply the triangle method to find the corner of the L-curve criteria en return the 'optimal' alpha for each curve
-        """
-
-        alphaOptIdx = []
-
-        # Iterate over the curves
- 
-
-        alphaOptIdx.append(find_Lcurve_corner(self.curvesResidualNorm[:],self.curvesPenaltyNorm[:]))
-
-        self.alphaOptIdx = alphaOptIdx
-
-        return None
-    
-
-    def getInitialEstimatesOptimalAlphaLcurve(self,timeLimit=1e8):
-
-        """
-        Use the 'optimal' alpha selected using the L-curve corner criteria and the triangle method
-        to estimate the distribution of (inverse) decay rates
-        """
-
-        self.optimalAlpha = [self.alphaVec[idx] for idx in self.alphaOptIdx]
-
-        self.getInitialEstimates(self.optimalAlpha,timeLimit)
-
-        return None
-
-    def predictAutocorrelationCurves(self):
-
-        # Create list to store the predicted autocorrelation data
-        
-        self.autocorrelationPredicted    = []
-
-
-            
-        betaEst = self.betaGuess
-        contEst = self.contributionsGuess
-
-        # check that we estimated the contributions!
-        if len(contEst) > 1:
-                
-            self.autocorrelationPredicted           =  g2_finite_aproximation(1 / self.s_space,self.Correlationx,betaEst,contEst)
-            # self.autocorrelationPredicted.append(np.array(autocorrelationPredicted))
-
-        else:
-            # In the case we couldn't fit anything!
-            self.autocorrelationPredicted.append(np.array(0))
-
-
-
-        return None
-    
-
-    def getWeights(self):
-
-        """
-        Compare the fitted and experimental autocorrelation curve to get the residuals
-        and assign weights to each point
-
-        Caution: Not used in the Raynals online tool!
-        """
-
-        residuals      = np.subtract(self.Correlationy,self.autocorrelationPredicted)
-        weights        = 1 / np.abs(residuals)
-        self.weights   = weights / weights.max(axis=0)
-
-        return None
-    
-    def getWeightedInitialEstimates(self,alpha=0.15,timeLimit=1e8):
-
-        """
-
-        Call after fitting the g2 correlation curves
-        that is, after running self.predictAutocorrelationCurves()
-
-        Caution: Not used in the Raynals online tool!
-        """
-
-        if self.weights is None:
-
-            self.getWeights()
-
-        selectedTimes = self.Correlationx < (timeLimit / 1e6)
-
-        # Return the fitted contributions and residuals of the first order autocorrelation function
-        self.contributionsGuess, self.residualsG1   = get_contributios_prior(
-            self.g1[selectedTimes],self.Correlationx[selectedTimes],self.s_space,self.betaGuess,alpha,self.weights) 
-
-        return None
-    
 class dls_sls_analysis:
     def __init__(self, dict_path):
         self.dict_path = dict_path
