@@ -7,7 +7,6 @@ from operator import itemgetter
 from jupyter_analysis_tools.utils import (isWindows, isMac, isLinux,
     isList, pushd, grouper, updatedDict)
 from pathlib import Path
-from from_git.helpers            import *
 from functions import *
 
 
