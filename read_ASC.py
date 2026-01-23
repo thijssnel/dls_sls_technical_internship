@@ -76,9 +76,7 @@ class read_asc:
         # Autocorrelation function g2(tau)
         # Skip first 5 points (typically noisy)
         # Convert time from microseconds to milliseconds
-        self.Correlationx = np.array(
-            [val * 1e-3 for val in self.data['Correlationx'][5:]]
-        )
+        self.Correlationx = np.array(self.data['Correlationx'][5:])* 1e-3
         self.Correlationy = np.array(self.data['Correlationy'][5:])
 
         # Normalize correlation to its maximum value
@@ -90,8 +88,8 @@ class read_asc:
 
         # Optional standard deviation data
         if 'StandardDeviationx' in self.data:
-            self.StandardDeviatiox = np.array(self.data['StandardDeviationx'])
-            self.StandardDeviatioy = np.array(self.data['StandardDeviationy'])
+            self.StandardDeviatiox = np.array(self.data['StandardDeviationx'][5:])*1e-3
+            self.StandardDeviatioy = np.array(self.data['StandardDeviationy'][5:])
 
     def ASC_2_dict(self, path):
         """
@@ -223,7 +221,7 @@ class read_asc:
 
     # ------------------------------------------------------------------
 
-    def quick_plot_cor(self, title='name'):
+    def quick_plot_cor(self,deviation=False, title='name'):
         """
         Plot the normalized autocorrelation function g2(tau)
         """
@@ -236,8 +234,10 @@ class read_asc:
 
         sns.set_theme()
         plt.plot(self.Correlationx, self.Correlationy)
+        if deviation:
+            plt.errorbar(self.StandardDeviatiox,self.Correlationy,self.StandardDeviatioy)
         plt.xscale('log')
-        plt.xlabel('Tau (ms)')
+        plt.xlabel('Tau (s)')
         plt.ylabel('Correlation')
         plt.title(title_str)
         plt.show()
@@ -323,8 +323,8 @@ class read_asc:
         plt.plot(self.Correlationx, self.Correlationy, 'b.', label='Data')
         plt.plot(self.Correlationx, g2_fit, 'r-', label='Fit')
         plt.xscale('log')
-        plt.xlabel('Tau (ms)')
-        plt.ylabel('g₂ − 1')
+        plt.xlabel('Tau (s)')
+        plt.ylabel('g₂')
         plt.title(f'{self.Samplename} at {self.Angle_deg}°')
         plt.legend()
         plt.show()
