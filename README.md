@@ -29,3 +29,17 @@ The directory_name/solution should contain experimental data with the sample.
 
 ### contin_fit
 Is a dls_sls_anasis inheritance class. 
+
+### SLS_functions
+Is a Python file that contains every function needed to perform the SLS analysis.
+For this, the above named file structure is sightly changed:
+
+**directory_name**
+|
+|--> concentration 1
+|
+|--> concentration 2
+|
+ --> concentration 3
+
+ Each concentration folder follows the same file structure as the structure named in the dls_sls_analysis section.
