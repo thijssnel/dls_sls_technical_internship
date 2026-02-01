@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from read_ASC_a import *
+from read_ASC import *
 from scipy.optimize import curve_fit
 
 plt.rcParams.update({
@@ -313,4 +313,5 @@ class SLS_analysis:
         plt.legend(fancybox=True)
         plt.grid(alpha=0.5)
         plt.tight_layout()
+
         plt.show()
